@@ -3,7 +3,9 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import ticker
-%matplotlib inline
+#%matplotlib inline
+print("waht happen")
+
 from sklearn.preprocessing import MinMaxScaler
 from keras.models import Sequential
 from keras.models import Model
@@ -11,6 +13,7 @@ from keras import optimizers
 from keras.layers import Concatenate,Flatten,Add,Activation,BatchNormalization,Conv2D,Dense, Dropout, LSTM,Input,ZeroPadding2D,AveragePooling2D,MaxPooling2D
 from keras.initializers import glorot_uniform
 from keras import backend as K
+print("waht happen")
 from keras.callbacks import ModelCheckpoint
 from keras.losses import mse
 import os
@@ -21,13 +24,15 @@ from mpl_finance import volume_overlay2
 from mpl_finance import volume_overlay
 from mpl_finance import index_bar
 from sklearn.preprocessing import MinMaxScaler
-
+from keras.utils import multi_gpu_model
 import cv2
 import pickle
-
-epochs = 16
-batch_size_is = 16
-
+print("waht happen")
+epochs = 60
+batch_size_is = 64
+use_gpu=False
+gpu_num=4
+#os.environ['CUDA_VISIABLE_DEVICE']='0,1,2,3'
 def convolutional_block(X, f, filters, stage, block, s = 2):
     """
     Implementation of the convolutional block as defined in Figure 4
@@ -101,37 +106,39 @@ def combine_model(multi_gpu=True,num_gpus=4):
     img_X = convolutional_block(img_X, f = 3, filters = [128, 128, 512], stage = 4, block='a', s = 2)
     img_X=AveragePooling2D(pool_size=(7, 7), strides=None, padding='valid')(img_X)
     img_X=Flatten()(img_X)
-    img_X=Dense(500,activation='relu')(img_X)
+    
     
     #img_X_more=img_X
-    img_X_more=Dropout(0.5)(img_X)
+    img_X_more=Dense(500,activation='relu')(img_X)
+    img_X_more=Dropout(rate=0.5)(img_X_more)
     img_X_more=Dense(100,activation='relu')(img_X_more)
-    img_X_more=Dropout(0.5)(img_X_more)
+    img_X_more=Dropout(rate=0.5)(img_X_more)
     img_X_more=Dense(25,activation='relu')(img_X_more)
-    img_X_more=Dropout(0.5)(img_X_more)
-    img_X_more=Dense(1)(img_X_more)
+    img_X_more=Dropout(rate=0.5)(img_X_more)
+    img_X_more=Dense(1,activation='sigmoid')(img_X_more)
     
     
-    lstm_X=LSTM(units=500, return_sequences=True)(lstm_X_input)
-    lstm_X=LSTM(units=500)(lstm_X)
-    lstm_X=Dense(500,activation='relu')(lstm_X)
+    lstm_X=LSTM(units=64, return_sequences=True,stateful=False)(lstm_X_input)
+    lstm_X=LSTM(units=64,return_sequences=False,stateful=False)(lstm_X)
+    
     
     #lstm_X_more=lstm_X
-    lstm_X_more=Dropout(0.5)(lstm_X)
+    #lstm_X_more=Dropout(rate=0.2)(lstm_X)
+    lstm_X_more=Dense(500,activation='relu')(lstm_X)
     lstm_X_more=Dense(100,activation='relu')(lstm_X_more)
-    lstm_X_more=Dropout(0.5)(lstm_X_more)
+    #lstm_X_more=Dropout(rate=0.2)(lstm_X_more)
     lstm_X_more=Dense(25,activation='relu')(lstm_X_more)
-    lstm_X_more=Dropout(0.5)(lstm_X_more)
-    lstm_X_more=Dense(1)(lstm_X_more)
+    #lstm_X_more=Dropout(rate=0.2)(lstm_X_more)
+    lstm_X_more=Dense(1,activation='sigmoid')(lstm_X_more)
     #consider output will reduce neuron again 
     fused=Concatenate()([img_X,lstm_X])
-    fused=Dense(500,activation='relu')(fused)
-    fused=Dropout(0.5)(fused)
+    #fused=Dense(500,activation='relu')(fused)
+    #fused=Dropout(rate=0.3)(fused)
     fused=Dense(100,activation='relu')(fused)
-    fused=Dropout(0.5)(fused)
+    #fused=Dropout(rate=0.3)(fused)
     fused=Dense(25,activation='relu')(fused)
-    fused=Dropout(0.5)(fused)
-    fused=Dense(1)(fused)
+    #fused=Dropout(rate=0.3)(fused)
+    fused=Dense(1,activation='sigmoid')(fused)
     model = Model(inputs=[img_X_input,lstm_X_input],outputs=fused)
     
     def root_mean_squared_error(y_true, y_pred):
@@ -146,7 +153,7 @@ def combine_model(multi_gpu=True,num_gpus=4):
         loss2=mse(y_true,lstm_X_more)
         loss3=mse(y_true,fused)
         #0.2*loss1+0.2*loss2+
-        return 0.2*loss1+0.2*loss2+loss3
+        return 0.2*K.sqrt(loss1)+0.2*K.sqrt(loss2)+K.sqrt(loss3)
     
     
     
@@ -162,7 +169,7 @@ def combine_model(multi_gpu=True,num_gpus=4):
     
         parallel_model.compile(optimizer= adam,
                       loss=root_mean_squared_error, 
-                      metrics=root_mean_squared_error)
+                      metrics=[root_mean_squared_error])
         return model, parallel_model
     
     
@@ -295,25 +302,37 @@ h5f.close()
 print("---done---")
 
 
-model=combine_model(False,0)
-
+model=combine_model(use_gpu,gpu_num)
+print(type(model))
 final_train_gen = merge_generator(img_gen(img_dir_lst[0:train_size],batch_size_is), lstm_gen(feature_lst[0:train_size],target_lst[0:train_size], batch_size_is))
 final_val_gen = merge_generator(img_gen(img_dir_lst[train_size:train_size+val_size],batch_size_is), lstm_gen(feature_lst[train_size:train_size+val_size],target_lst[train_size:train_size+val_size], batch_size_is))
 
 
 print('debug1')
-filepath="weights_best.hdf5"
-checkpoint = ModelCheckpoint(filepath, monitor='val_sme', verbose=1, save_best_only=True, mode='max')
-history=model.fit_generator(final_train_gen,  # Features, labels
+filepath="weights.{epoch:02d}-{val_loss:.8f}.hdf5"
+checkpoint = ModelCheckpoint(filepath, monitor='val_loss', verbose=1, save_best_only=True, mode='auto')
+if type(model)==tupel:
+
+    history=model[1].fit_generator(final_train_gen,  # Features, labels
                             steps_per_epoch=train_size//batch_size_is,
                             epochs=epochs,
                             validation_data=final_val_gen,
-                            validation_steps=val_size // batch_size_is
+                            validation_steps=val_size // batch_size_is,
                             callbacks=[checkpoint]
                             #verbose=1 
                             #callbacks=callbacks
                             )  
+else:
 
+       history=model.fit_generator(final_train_gen,  # Features, labels
+                            steps_per_epoch=train_size//batch_size_is,
+                            epochs=epochs,
+                            validation_data=final_val_gen,
+                            validation_steps=val_size // batch_size_is,
+                            callbacks=[checkpoint]
+                            #verbose=1 
+                            #callbacks=callbacks
+                            )  
 
 print('debug2')
 
